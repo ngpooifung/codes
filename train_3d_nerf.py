@@ -226,7 +226,7 @@ def random_select_rays(H, W, rays_o, rays_d, img, N_rand):
     return selected_rays_o, selected_rays_d, selected_img
 
 
-def fit_images_and_calculate_psnr(data_path, epochs=2000, learning_rate=5e-4):
+def fit_images_and_calculate_psnr(data_path, epochs=1000, learning_rate=5e-4):
     # get available device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
