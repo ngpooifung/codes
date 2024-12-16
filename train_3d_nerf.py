@@ -3,7 +3,6 @@ import numpy as np
 from torch import nn
 import torch.nn.functional as F
 import torchvision
-import tensorflow as tf
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio as psnr
 
@@ -30,39 +29,37 @@ class PositionalEncoder(nn.Module):
     def __init__(self, data_range, L):
         super(PositionalEncoder, self).__init__()
         self.L = L
-        self.data_range = data_range[1]
-        self.register_buffer('pos_table', self.get_sinusoid_encoding_table(self.L, self.data_range))
-
-    def get_sinusoid_encoding_table(self, L, data_range):
-        def get_position_angle_vec(position):
-            return [position / np.power(10000, 2 * (hid_j // 2) / data_range) for hid_j in range(data_range)]
-
-        sinusoid_table = np.array([get_position_angle_vec(pos_i) for pos_i in range(L + 1)])
-        sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])
-        sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])
-
-        return torch.FloatTensor(sinusoid_table).unsqueeze(0)
+        self.data_range = data_range
 
     def forward(self, x):
-        return x + self.pos_table[:, x.size(1)].clone().detach()
+        # Get the original shape and device
+        orig_shape = list(x.shape)
+        device = x.device
 
-# Hash grid encoding
-class MultiResHashGridEncoder(nn.Module):
-    """
-    Implement the Hash Grid Encoding function.
-    Please note that the input tensor x should be normalized to the range [0, 1].
+        # Scale input from [-1,1] to [-pi,pi]
+        x = x * torch.pi
 
-    Args:
-    x (torch.Tensor): The input tensor to be embedded.
-    n_levels (int): The number of grid levels.
-    n_features_per_level (int): The number of features per grid level.
+        # Prepare frequencies for 2^[0...L-1]
+        freqs = 2.0 ** torch.arange(self.L, device=device)
 
-    Returns:
-    torch.Tensor: The embedded tensor.
-    """
-    def __init__(self, data_range, n_levels, n_features_per_level):
-        super(MultiResHashGridEncoder, self).__init__()
-        pass
+        # Reshape x for broadcasting
+        x_expanded = x.view(*orig_shape, 1)
+
+        # Compute sin and cos embeddings
+        x_freqs = x_expanded * freqs.view(*([1] * len(orig_shape)), -1)
+        sin_embed = torch.sin(x_freqs)
+        cos_embed = torch.cos(x_freqs)
+
+        # Concatenate sin and cos embeddings
+        embed = torch.cat([sin_embed, cos_embed], dim=-1)
+
+        # Flatten the last dimension
+        embed = embed.view(*orig_shape[:-1], -1)
+
+        # print("embed.shape",embed.shape)
+
+        return embed
+
 
 
 
@@ -81,28 +78,27 @@ def sample_rays(H, W, f, c2w):
     rays_d (torch.Tensor): The direction of each ray, with shape (W, H, 3).
     """
     # Create a grid of pixel coordinates
-    # Convert pixel coordinates to camera coordinates
-    # Transform camera directions to world directions using the camera-to-world matrix
-    # The origin of each ray is the camera position
+    i, j = torch.meshgrid(torch.arange(H), torch.arange(W))
+    i = i.cuda()
+    j = j.cuda()
 
-    #H = H.cpu()
-    #W = W.cpu()
-    f = f.cpu()
-    #c2w = c2w.cpu()
-    '''
-    i, j = tf.meshgrid(tf.range(W, dtype=tf.float32),
-                       tf.range(H, dtype=tf.float32), indexing='xy')
-    dirs = tf.stack([(i - W * .5) / f, -(j - H * .5) / f, -tf.ones_like(i)], -1)
-    rays_d = tf.reduce_sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
-    rays_o = tf.broadcast_to(c2w[:3, -1], tf.shape(rays_d))
-    '''
-    i, j = np.meshgrid(np.arange(W, dtype=np.float32),
-                       np.arange(H, dtype=np.float32), indexing='xy')
-    dirs = np.stack([(i - W * .5) / f, -(j - H * .5) / f, -np.ones_like(i)], -1)
-    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
-    rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
+    # Convert pixel coordinates to camera coordinates
+    dirs = torch.stack([(i - W * 0.5) / f, (j - H * 0.5) / f, torch.ones_like(i)], dim=-1)  # (W, H, 3)
+
+    # Transform camera directions to world directions using the camera-to-world matrix
+    rays_d = (dirs[..., None, :] @ c2w[:3, :3].T).squeeze(-1)  # (W, H, 3)
+    rays_d = rays_d.squeeze(-2)
+    # The origin of each ray is the camera position
+    rays_o = c2w[:3, 3].expand(H, W, -1)  # (W, H, 3)
+
+    # print("rays_o.shape",rays_o.shape)
+    # print("rays_d.shape",rays_d.shape)
+
+    # import pdb; pdb.set_trace()
 
     return rays_o, rays_d
+
+    # pass
 
 def sample_points_along_the_ray(tn, tf, N_samples):
     """
@@ -118,15 +114,22 @@ def sample_points_along_the_ray(tn, tf, N_samples):
                   where ... corresponds to the shape of tn or tf.
     """
     # Generate random numbers between 0 and 1 for each sample
+    uniform_samples = torch.linspace(0.0, 1.0, N_samples, device=tn.device)  # Shape: (N_samples,)
+
     # Generate uniform samples in the interval [0, 1] for each segment
+    random_noise = torch.rand(N_samples, *tn.shape).cuda()  # Shape: (N_samples, ...)
     # Add the random jitter to the uniform samples
+    jittered_samples = uniform_samples + (random_noise - 0.5) / N_samples
+    jittered_samples = torch.clamp(jittered_samples, 0.0, 1.0)  # Ensure within [0, 1]
+
     # Calculate the points along the ray by interpolating between tn and tf
     # using the sampled values
+    sampled_points = tn[..., None] + jittered_samples * (tf[..., None] - tn[..., None])  # Shape: (N_samples, ...)
 
-    t_vals = tf.linspace(0., 1., N_samples)
-    z_vals = tn * (1. - t_vals) + tf * (t_vals)
 
-    return z_vals
+    print("sampled_points.shape",sampled_points.shape)
+    return sampled_points
+
 
 def volumn_render(NeRF, rays_o, rays_d, N_samples):
     """
@@ -141,25 +144,45 @@ def volumn_render(NeRF, rays_o, rays_d, N_samples):
     Returns:
     torch.Tensor: The rendered RGB image.
     """
-    # Sample points along each ray, from near plane to far plane
+        # Define near and far planes
+    # Define near and far planes
+    tn, tf = 2.0, 6.0  # Example near and far planes
 
-    # Calculate the points along the rays by sampling
-    # pts.shape => (N_rays, N_samples, 3)
+   # Sample points along the rays
+    t_vals = torch.linspace(0.0, 1.0, N_samples, device=rays_o.device)  # (N_samples,)
+    z_vals = tn + t_vals * (tf - tn)  # (N_samples,)
+    z_vals = z_vals.expand(rays_o.shape[0], N_samples)  # (N_rays, N_samples)
 
-    # Get the color and density from the NeRF model
+    # Compute 3D coordinates of sampled points along rays
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # (N_rays, N_samples, 3)
 
-    # Volume rendering: compute the transmittance and accumulate the color
-    # alpha = 1. - torch.exp(-delta * torch.relu(sigma)) # original formula in the paper
-    # alpha = 1. - torch.exp(-delta * torch.nn.Softplus()(sigma)) # you can choose the trick to stabilize training
+    # Get RGB and density from NeRF
+    dirs = rays_d[..., None, :].expand_as(pts)  # (N_rays, N_samples, 3)
+    rgb, sigma = NeRF(pts, dirs)  # rgb.shape => (N_rays, N_samples, 3), sigma.shape => (N_rays, N_samples)
+    sigma = sigma.squeeze(-1)
 
-    # Compute the weights for each sample using alpha compositing
+    # Compute distances between adjacent points (delta)
+    delta = z_vals[..., 1:] - z_vals[..., :-1]  # (N_rays, N_samples - 1)
+    delta = torch.cat([delta, torch.tensor([1e10], device=delta.device).expand(rays_o.shape[0], 1)], dim=-1)  # (N_rays, N_samples)
 
-    # Accumulate the color along each ray
-    z_vals = sample_points_along_the_ray(rays_o, rays_o + rays_d*100, N_samples)
-    pred_rgb = NeRF(z_vals)
+    # Debug shapes
+    # print(f"delta.shape: {delta.shape}")  # 应为 (N_rays, N_samples)
+    # print(f"sigma.shape: {sigma.shape}")  # 应为 (N_rays, N_samples)
 
-    return pred_rgb
+    # Compute alpha (opacity)
+    alpha = 1.0 - torch.exp(-delta * torch.relu(sigma))  # (N_rays, N_samples)
 
+    # Compute transmittance
+    T = torch.cumprod(1.0 - alpha + 1e-10, dim=-1)  # (N_rays, N_samples)
+    T = torch.cat([torch.ones_like(T[..., :1]), T[..., :-1]], dim=-1)  # Shift for correct computation
+
+    # Compute weights
+    weights = alpha * T  # (N_rays, N_samples)
+
+    # Compute the final accumulated color
+    rgb_image = torch.sum(weights[..., None] * rgb, dim=-2)  # (N_rays, 3)
+
+    return rgb_image
 
 
 def random_select_rays(H, W, rays_o, rays_d, img, N_rand):
@@ -188,10 +211,17 @@ def random_select_rays(H, W, rays_o, rays_d, img, N_rand):
 
     # Select the corresponding coordinates, rays, and image pixels
     select_coords = coords[select_inds].long().to("cpu")  # (N_rand, 2)
+    # print("select_coords.shape",select_coords.shape)
     selected_rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
     selected_rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
     selected_img = img[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
     selected_img = torch.tensor(selected_img, dtype=torch.float32)  # Ensure float32 dtype
+
+    # print("selected_rays_o.shape",selected_rays_o.shape)
+    # print("selected_rays_d.shape",selected_rays_d.shape)
+    # print("selected_img.shape",selected_img.shape)
+
+    # import pdb; pdb.set_trace()
 
     return selected_rays_o, selected_rays_d, selected_img
 
@@ -219,13 +249,15 @@ def fit_images_and_calculate_psnr(data_path, epochs=2000, learning_rate=5e-4):
         dir_encoder=dir_encoder,
         input_dim=60,
         view_dim=24,
+        num_layers=8,
+        hidden_dim=256,
     ).to(device)
     optimizer = torch.optim.Adam(nerf.parameters(), lr=learning_rate)
     loss = nn.MSELoss()
 
     # train the model
     N_samples = 64 # number of samples per ray
-    N_rand = 1024 # number of rays per iteration, adjust according to your GPU memory
+    N_rand = 1024 # number of rays per iteration, adjust according to your GPU memory (1024 is too much)
     for epoch in tqdm(range(epochs+1)):
         for i in range(len(dataset)):
             img, pose, focal = dataset[i]
@@ -237,12 +269,24 @@ def fit_images_and_calculate_psnr(data_path, epochs=2000, learning_rate=5e-4):
             # sample rays
             rays_o, rays_d = sample_rays(H, W, focal, c2w=pose)
 
+            # print("rays_o.shape",rays_o.shape)
+            # print("rays_d.shape",rays_d.shape)
+
             # random select N_rand rays to reduce memory usage
             selected_rays_o, selected_rays_d, selected_gt_rgb = random_select_rays(H, W, rays_o, rays_d, img, N_rand)
+
+            # print("selected_rays_o.shape",selected_rays_o.shape)
+            # print("selected_rays_d.shape",selected_rays_d.shape)
+            # print("selected_gt_rgb.shape",selected_gt_rgb.shape)
 
             # volumn render
             pred_rgb = volumn_render(NeRF=nerf, rays_o=selected_rays_o, rays_d=selected_rays_d, N_samples=N_samples)
 
+
+            # print("pred_rgb.shape",pred_rgb.shape)
+            # print("selected_gt_rgb.shape",selected_gt_rgb.shape)
+
+            # import pdb; pdb.set_trace()
             l = loss(pred_rgb, selected_gt_rgb)
             optimizer.zero_grad()
             l.backward()
@@ -259,10 +303,12 @@ def fit_images_and_calculate_psnr(data_path, epochs=2000, learning_rate=5e-4):
                     rays_d_chunk = rays_d.reshape(-1, 3)[i:i+chunk_size]
                     pred_rgb.append(volumn_render(NeRF=nerf, rays_o=rays_o_chunk, rays_d=rays_d_chunk, N_samples=N_samples))
                 pred_rgb = torch.cat(pred_rgb, dim=0)
-                torchvision.utils.save_image(pred_rgb.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'output/NeRF/pred_{epoch}.png')
-                torchvision.utils.save_image(img.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'output/NeRF/gt_{epoch}.png')
+                torchvision.utils.save_image(pred_rgb.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output_trial/NeRF_ds_1/pred_{epoch}.png')
+                torchvision.utils.save_image(img.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output_trial/NeRF_ds_1/gt_{epoch}.png')
 
 
 if __name__ == '__main__':
+    # import argparse
+    # parser = argparse.ArgumentParser()
     data_path = './data/lego' # data path
     psnr_value = fit_images_and_calculate_psnr(data_path)
