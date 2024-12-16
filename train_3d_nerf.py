@@ -303,8 +303,8 @@ def fit_images_and_calculate_psnr(data_path, epochs=2000, learning_rate=5e-4):
                     rays_d_chunk = rays_d.reshape(-1, 3)[i:i+chunk_size]
                     pred_rgb.append(volumn_render(NeRF=nerf, rays_o=rays_o_chunk, rays_d=rays_d_chunk, N_samples=N_samples))
                 pred_rgb = torch.cat(pred_rgb, dim=0)
-                torchvision.utils.save_image(pred_rgb.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output_trial/NeRF_ds_1/pred_{epoch}.png')
-                torchvision.utils.save_image(img.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output_trial/NeRF_ds_1/gt_{epoch}.png')
+                torchvision.utils.save_image(pred_rgb.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output/NeRF3D/pred_{epoch}.png')
+                torchvision.utils.save_image(img.reshape(H, W, 3).permute(2, 0, 1).unsqueeze(0), f'./output/NeRF3D/gt_{epoch}.png')
 
 
 if __name__ == '__main__':
