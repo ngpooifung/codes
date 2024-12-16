@@ -269,22 +269,15 @@ def fit_images_and_calculate_psnr(data_path, epochs=1000, learning_rate=5e-4):
             # sample rays
             rays_o, rays_d = sample_rays(H, W, focal, c2w=pose)
 
-            # print("rays_o.shape",rays_o.shape)
-            # print("rays_d.shape",rays_d.shape)
 
             # random select N_rand rays to reduce memory usage
             selected_rays_o, selected_rays_d, selected_gt_rgb = random_select_rays(H, W, rays_o, rays_d, img, N_rand)
 
-            # print("selected_rays_o.shape",selected_rays_o.shape)
-            # print("selected_rays_d.shape",selected_rays_d.shape)
-            # print("selected_gt_rgb.shape",selected_gt_rgb.shape)
+
 
             # volumn render
             pred_rgb = volumn_render(NeRF=nerf, rays_o=selected_rays_o, rays_d=selected_rays_d, N_samples=N_samples)
 
-
-            # print("pred_rgb.shape",pred_rgb.shape)
-            # print("selected_gt_rgb.shape",selected_gt_rgb.shape)
 
             # import pdb; pdb.set_trace()
             l = loss(pred_rgb, selected_gt_rgb)
@@ -308,7 +301,5 @@ def fit_images_and_calculate_psnr(data_path, epochs=1000, learning_rate=5e-4):
 
 
 if __name__ == '__main__':
-    # import argparse
-    # parser = argparse.ArgumentParser()
     data_path = './data/lego' # data path
     psnr_value = fit_images_and_calculate_psnr(data_path)
